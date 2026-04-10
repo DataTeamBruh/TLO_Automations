@@ -8,7 +8,7 @@ from requests.auth import HTTPBasicAuth
 
 
 # CONFIG
-TEST_MODE = False
+TEST_MODE = True
 
 load_dotenv()
 
