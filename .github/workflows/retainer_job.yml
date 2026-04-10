@@ -1,0 +1,40 @@
+name: Retainer Monitor
+
+on:
+  schedule:
+    - cron: '0 7 * * 3'
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Retainer Monitor
+        env:
+          retainer_url: ${{ secrets.retainer_url }}
+          username: ${{ secrets.username }}
+          password: ${{ secrets.password }}
+          channel_id: ${{ secrets.channel_id }}
+          slack_token: ${{ secrets.slack_token }}
+        run: |
+          python Retainer_Deposit.py
+
+      - name: Ping Healthchecks
+        run: curl -fsS ${{ secrets.HEALTHCHECK_URL }} || true
+
+      - name: Ping Healthchecks (failure)
+        if: failure()
+        run: curl -fsS ${{ secrets.HEALTHCHECK_URL }}/fail || true

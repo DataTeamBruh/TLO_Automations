@@ -1,0 +1,40 @@
+name: Negative Margins Monitor
+
+on:
+  schedule:
+    - cron: '0 9 * * 3'
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Negative Margins Monitor
+        env:
+          user_url: ${{ secrets.user_url }}
+          margins_url: ${{ secrets.margins_url }}
+          username: ${{ secrets.username }}
+          password: ${{ secrets.password }}
+          slack_token: ${{ secrets.slack_token }}
+        run: |
+          python negative_margins.py
+
+      - name: Ping Healthchecks
+        run: curl -fsS ${{ secrets.HealthCheck_Negative_Margin }} || true
+
+      - name: Ping Healthchecks (failure)
+        if: failure()
+        run: curl -fsS ${{ secrets.HealthCheck_Negative_Margin }}/fail || true

@@ -1,0 +1,40 @@
+name: Financial Accounts Monitor
+
+on:
+  schedule:
+    - cron: '0 7 * * 3' 
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Financial Accounts Monitor
+        env:
+          user_url: ${{ secrets.user_url }}
+          invoices_url: ${{ secrets.invoices_url }}
+          username: ${{ secrets.username }}
+          password: ${{ secrets.password }}
+          slack_token: ${{ secrets.slack_token }}
+        run: |
+          python financial_accounts.py
+
+      - name: Ping Healthchecks
+        run: curl -fsS ${{ secrets.HealthCheck_Financial_Accounts }} || true
+
+      - name: Ping Healthchecks (failure)
+        if: failure()
+        run: curl -fsS ${{ secrets.HealthCheck_Financial_Accounts }}/fail || true
