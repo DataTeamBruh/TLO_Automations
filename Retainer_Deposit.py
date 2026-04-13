@@ -8,14 +8,15 @@ from requests.auth import HTTPBasicAuth
 
 
 # CONFIG
-TEST_MODE = True
+TEST_MODE = False
 
 load_dotenv()
 
 retainer_url = os.getenv("retainer_url")
 username = os.getenv("username")
 password = os.getenv("password")
-channel_id = os.getenv("channel_id")
+#channel_id = os.getenv("channel_id")
+channel_id = "C0A97PKJ9JL"
 slack_token = os.getenv("slack_token")
 
 # FETCH RETAINER DATA
