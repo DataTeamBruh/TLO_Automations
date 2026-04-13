@@ -8,7 +8,7 @@ from requests.auth import HTTPBasicAuth
 
 
 # CONFIG
-TEST_MODE = False
+TEST_MODE = True
 
 load_dotenv()
 
@@ -177,6 +177,23 @@ def run_retainer_job():
         user_token=slack_token,
         test_mode=TEST_MODE
     )
+
+summary_message = f"""
+✅ *Retainer Alerts Sent Successfully*
+
+🟡 50% Threshold ({len(clients_50)} clients):
+{chr(10).join(clients_50) if clients_50 else 'None'}
+
+🔴 80% Threshold ({len(clients_80)} clients):
+{chr(10).join(clients_80) if clients_80 else 'None'}
+"""
+
+send_message_as_user(
+    channel_id=channel_id,
+    message=summary_message,
+    user_token=slack_token,
+    test_mode=TEST_MODE
+)
 
 # RUN SCRIPT
 
