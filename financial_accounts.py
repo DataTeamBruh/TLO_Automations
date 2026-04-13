@@ -7,7 +7,7 @@ from xml.etree import ElementTree as ET
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-TEST_MODE = True
+TEST_MODE = False
 
 load_dotenv()
 
