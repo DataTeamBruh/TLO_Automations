@@ -7,42 +7,38 @@ from xml.etree import ElementTree as ET
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-TEST_MODE = False
+
+TEST_MODE = False  # Set to True to prevent actual Slack messages during testing
 
 load_dotenv()
 
-USER_URL = os.getenv("user_url") or os.getenv("user_url")
-INVOICES_URL = os.getenv("invoices_url") or os.getenv("invoices_url")
-USERNAME = os.getenv("username") or os.getenv("username")
-PASSWORD = os.getenv("password") or os.getenv("password")
-SLACK_TOKEN = os.getenv("slack_token") or os.getenv("slack_token")
+INVOICES_URL = os.getenv("invoices_url")
+USERNAME = os.getenv("username")
+PASSWORD = os.getenv("password")
+SLACK_TOKEN = os.getenv("slack_token")
 
 
-def get_odata_dataframe(url, username, password):
-    try:
-        response = requests.get(url, auth=HTTPBasicAuth(username, password), timeout=30)
-        response.raise_for_status()
-        data = response.json()
-
-        if "value" in data:
-            df = pd.DataFrame(data["value"])
-            print("✅ Data successfully loaded into DataFrame")
-            return df
-
-        raise ValueError("No 'value' key found in JSON response")
-    except Exception as e:
-        print(f"❌ Error loading JSON OData: {e}")
-        return pd.DataFrame()
+REQUIRED_INVOICE_COLUMNS = [
+    "INVOICE_NUMBER",
+    "INVOICE_OWNER_MAIL",
+    "FINACCOUNT_CODE",
+    "CREATED_DT",
+]
 
 
 def get_odata_dataframe_xml(url, username, password):
+    """
+    Fetch invoice data from an XML OData endpoint and convert it into a DataFrame.
+    Keeps only the invoice columns needed for this job.
+    """
     try:
         headers = {"Accept": "application/atom+xml"}
+
         response = requests.get(
             url,
             auth=HTTPBasicAuth(username, password),
             headers=headers,
-            timeout=30,
+            timeout=60,
         )
         response.raise_for_status()
 
@@ -54,51 +50,90 @@ def get_odata_dataframe_xml(url, username, password):
             "m": "http://schemas.microsoft.com/ado/2007/08/dataservices/metadata",
         }
 
-        entries = []
+        rows = []
+
         for entry in root.findall("atom:entry", ns):
             content = entry.find("atom:content", ns)
-            properties = content.find("m:properties", ns)
-            row = {}
-            for prop in properties:
-                tag = prop.tag.split("}")[-1]
-                row[tag] = prop.text
-            entries.append(row)
+            if content is None:
+                continue
 
-        df = pd.DataFrame(entries)
-        print(f"✅ Parsed {len(df)} records into DataFrame")
+            properties = content.find("m:properties", ns)
+            if properties is None:
+                continue
+
+            row = {}
+
+            for prop in properties:
+                column_name = prop.tag.split("}")[-1]
+
+                if column_name in REQUIRED_INVOICE_COLUMNS:
+                    row[column_name] = prop.text
+
+            if row:
+                rows.append(row)
+
+        df = pd.DataFrame(rows)
+
+        print(f"✅ Parsed {len(df)} invoice records into DataFrame")
         return df
 
     except Exception as e:
-        print(f"❌ Error parsing XML: {e}")
+        print(f"❌ Error parsing XML invoice data: {e}")
         return pd.DataFrame()
 
 
 def fetch_slack_users(slack_token):
-    headers = {"Authorization": f"Bearer {slack_token}"}
-    url = "https://slack.com/api/users.list"
+    """
+    Pull active Slack users and return email-to-user-id mapping.
+    Includes pagination.
+    """
+    client = WebClient(token=slack_token)
+
+    users = []
+    cursor = None
 
     try:
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        data = response.json()
+        while True:
+            response = client.users_list(cursor=cursor, limit=200)
 
-        if not data.get("ok"):
-            raise Exception(f"Slack API Error: {data.get('error')}")
+            if not response.get("ok"):
+                raise Exception(f"Slack API Error: {response.get('error')}")
 
-        users = [
-            {
-                "user_id": member["id"],
-                "real_name": member.get("real_name", ""),
-                "email": member.get("profile", {}).get("email", ""),
-                "job_title": member.get("profile", {}).get("title", ""),
-                "is_bot": member.get("is_bot", False),
-                "deleted": member.get("deleted", False),
-            }
-            for member in data["members"]
-        ]
+            members = response.get("members", [])
+
+            for member in members:
+                profile = member.get("profile", {}) or {}
+
+                users.append(
+                    {
+                        "user_id": member.get("id"),
+                        "email": profile.get("email", ""),
+                        "is_bot": member.get("is_bot", False),
+                        "deleted": member.get("deleted", False),
+                    }
+                )
+
+            cursor = response.get("response_metadata", {}).get("next_cursor")
+
+            if not cursor:
+                break
 
         df = pd.DataFrame(users)
-        print("✅ Slack users pulled into DataFrame")
+
+        if df.empty:
+            print("❌ Slack users DataFrame is empty")
+            return df
+
+        df = df[
+            (~df["is_bot"])
+            & (~df["deleted"])
+            & (df["email"].notna())
+            & (df["email"] != "")
+        ][["email", "user_id"]].copy()
+
+        df["email"] = df["email"].astype(str).str.lower().str.strip()
+
+        print(f"✅ Pulled {len(df)} active Slack users")
         return df
 
     except Exception as e:
@@ -106,107 +141,281 @@ def fetch_slack_users(slack_token):
         return pd.DataFrame()
 
 
-def notify_users_about_invoices(filtered_df: pd.DataFrame, slack_token: str, preview: bool = True) -> None:
+def prepare_financial_account_invoices(df_invoice):
+    """
+    Filter invoice data to invoices using the 4045 default financial account.
+    Only includes proforma invoices containing 'PF' from the last 120 days.
+    """
+    if df_invoice.empty:
+        return pd.DataFrame()
+
+    missing_columns = [
+        col for col in REQUIRED_INVOICE_COLUMNS if col not in df_invoice.columns
+    ]
+
+    if missing_columns:
+        print(f"❌ Missing invoice columns: {missing_columns}")
+        return pd.DataFrame()
+
+    df = df_invoice[REQUIRED_INVOICE_COLUMNS].copy()
+
+    df["FINACCOUNT_CODE"] = df["FINACCOUNT_CODE"].astype(str).str.strip()
+    df["INVOICE_NUMBER"] = df["INVOICE_NUMBER"].astype(str).str.strip()
+
+    df["CREATED_DT"] = pd.to_datetime(
+        df["CREATED_DT"],
+        errors="coerce",
+    )
+
+    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=120)
+
+    df = df[
+        (df["FINACCOUNT_CODE"].eq("4045"))
+        & (df["INVOICE_NUMBER"].str.contains("PF", case=False, na=False))
+        & (df["CREATED_DT"].notna())
+        & (df["CREATED_DT"] >= cutoff)
+    ].copy()
+
+    df["user_email"] = (
+        df["INVOICE_OWNER_MAIL"]
+        .astype(str)
+        .str.lower()
+        .str.strip()
+    )
+
+    df = df[
+        ["user_email", "INVOICE_NUMBER", "FINACCOUNT_CODE", "CREATED_DT"]
+    ].copy()
+
+    df = df.drop_duplicates(
+        subset=["user_email", "INVOICE_NUMBER", "FINACCOUNT_CODE"]
+    )
+
+    print(f"✅ Financial account invoice rows after filtering: {len(df)}")
+    return df
+
+
+def attach_slack_ids(df_financial_accounts, df_slack_users):
+    """
+    Add Slack user IDs to invoice rows by matching invoice owner email.
+    """
+    if df_financial_accounts.empty or df_slack_users.empty:
+        return pd.DataFrame()
+
+    df = pd.merge(
+        df_financial_accounts,
+        df_slack_users,
+        left_on="user_email",
+        right_on="email",
+        how="left",
+    )
+
+    df = df.rename(columns={"user_id": "user_slack_id"})
+
+    df = df[
+        [
+            "user_email",
+            "user_slack_id",
+            "INVOICE_NUMBER",
+            "FINACCOUNT_CODE",
+            "CREATED_DT",
+        ]
+    ].copy()
+
+    missing_slack = df["user_slack_id"].isna().sum()
+
+    if missing_slack:
+        print(f"⚠️ {missing_slack} financial account rows have no matching Slack user")
+
+    df = df.dropna(subset=["user_slack_id"]).copy()
+
+    df["user_slack_id"] = df["user_slack_id"].astype(str).str.strip()
+
+    df = df.drop_duplicates(
+        subset=["user_slack_id", "user_email", "INVOICE_NUMBER"]
+    )
+
+    print(f"✅ Financial account rows ready for Slack notification: {len(df)}")
+    return df
+
+
+def open_dm_channel(client, user_id):
+    response = client.conversations_open(users=[user_id])
+    return response["channel"]["id"]
+
+
+def notify_users_about_invoices(df_notifications, slack_token, test_mode=True):
+    """
+    Group invoices by Slack user and send one DM per user.
+    Returns a list of recipients who were messaged,
+    or who would be messaged in test mode.
+    """
+    print("🔧 TEST MODE:", "ON - no Slack messages will be sent" if test_mode else "OFF")
+
+    sent_recipients = []
+
+    if df_notifications.empty:
+        print("ℹ️ No financial account invoices to notify")
+        return sent_recipients
+
     client = WebClient(token=slack_token)
 
-    required_cols = ["user_slack_id", "user_email", "INVOICE_NUMBER"]
-    missing = [c for c in required_cols if c not in filtered_df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+    grouped = (
+        df_notifications
+        .groupby(["user_slack_id", "user_email"], dropna=False)
+        .agg(invoice_numbers=("INVOICE_NUMBER", list))
+        .reset_index()
+    )
 
-    base_df = filtered_df.dropna(subset=["user_slack_id", "INVOICE_NUMBER"]).copy()
-    deduped_df = base_df.drop_duplicates(subset=["user_slack_id", "INVOICE_NUMBER"])
+    print(f"✅ Users to notify: {len(grouped)}")
 
-    if preview:
-        removed = len(base_df) - len(deduped_df)
-        if removed > 0:
-            print(
-                f"ℹ️ Deduplicated messages: {removed} duplicates removed "
-                f"(from {len(base_df)} rows to {len(deduped_df)} unique messages)."
-            )
+    for _, row in grouped.iterrows():
+        user_id = row["user_slack_id"]
+        user_email = row["user_email"]
+        invoice_numbers = row["invoice_numbers"]
 
-    for _, row in deduped_df.iterrows():
-        user_id = str(row.get("user_slack_id")).strip()
-        user_email = str(row.get("user_email", "")).strip()
-        invoice_num = str(row.get("INVOICE_NUMBER", "")).strip()
+        unique_invoices = []
+        seen = set()
 
-        user_msg = (
-            f"Hi <@{user_id}>, 😊\n\n"
-            f"Just a quick reminder to double-check all the line items on *{invoice_num}*. "
-            f"A few of them are still linked to the 4045 default financial account. "
+        for invoice_number in invoice_numbers:
+            invoice_number = str(invoice_number).strip()
+
+            if invoice_number in seen:
+                continue
+
+            seen.add(invoice_number)
+            unique_invoices.append(invoice_number)
+
+        invoice_lines = "\n".join(
+            [f"• *{invoice_number}*" for invoice_number in unique_invoices]
+        )
+
+        invoice_block = (
+            invoice_lines
+            if invoice_lines
+            else "• No invoice details found"
+        )
+
+        message = (
+            f"Hi <@{user_id}> 😊\n\n"
+            f"Just a quick reminder to double-check all the line items on the following invoice(s):\n\n"
+            f"{invoice_block}\n\n"
+            f"A few of them are still linked to the *4045 default financial account*. "
             f"When you get a moment, please update your proforma with the right departmental "
-            f"fin accounts before ticking the invoice check box for Alexia to commit.\n\n"
+            f"financial accounts before ticking the invoice check box for Alexia to commit.\n\n"
             f"This will help prevent misallocation of departmental income.\n\n"
             f"Thank you 💙"
         )
 
-        if preview:
-            print("🧪 PREVIEW MODE — message NOT sent")
-            print(f"To: {user_email} (Slack ID: {user_id})")
-            print(user_msg)
-            print("-" * 80)
+        recipient_record = {
+            "user_email": user_email,
+            "user_slack_id": user_id,
+            "invoice_count": len(unique_invoices),
+        }
+
+        if test_mode:
+            print(f"🧪 TEST → Would DM {user_email} ({user_id}):\n{message}\n")
+            sent_recipients.append(recipient_record)
             continue
 
         try:
-            client.chat_postMessage(channel=user_id, text=user_msg)
-            print(f"✅ Invoice reminder sent to {user_email} (user_id: {user_id})")
+            channel_id = open_dm_channel(client, user_id)
+            client.chat_postMessage(channel=channel_id, text=message)
+            print(f"✅ Message sent to {user_email}")
+            sent_recipients.append(recipient_record)
+
         except SlackApiError as e:
-            err = e.response.get("error", "unknown_error")
-            print(f"❌ Failed to send to {user_email} (user_id: {user_id}): {err}")
+            error = e.response.get("error", "unknown_error")
+            metadata = e.response.get("response_metadata", {}) or {}
+            needed = metadata.get("needed")
+
+            print(
+                f"❌ Error sending to {user_email}: {error}"
+                + (f" - needed: {needed}" if needed else "")
+            )
+
         except Exception as e:
-            print(f"❌ Unexpected error sending to {user_email} (user_id: {user_id}): {e}")
+            print(f"❌ Unexpected error sending to {user_email}: {e}")
+
+    return sent_recipients
+
+
+def print_sent_recipients(sent_recipients):
+    """
+    Print the final list of people messaged after the job finishes.
+    """
+    if sent_recipients:
+        print(
+            "📬 Messages sent to:"
+            if not TEST_MODE
+            else "📬 TEST MODE - messages would be sent to:"
+        )
+
+        for recipient in sent_recipients:
+            print(
+                f"- {recipient['user_email']} "
+                f"({recipient['user_slack_id']}) "
+                f"- {recipient['invoice_count']} invoice(s)"
+            )
+    else:
+        print("📬 No Slack messages were sent.")
 
 
 def main():
-    if not all([USER_URL, INVOICES_URL, USERNAME, PASSWORD, SLACK_TOKEN]):
+    if not all([INVOICES_URL, USERNAME, PASSWORD, SLACK_TOKEN]):
         print("❌ Missing one or more required environment variables.")
         return
 
-    df_user = get_odata_dataframe(USER_URL, USERNAME, PASSWORD)
-    df_invoice = get_odata_dataframe_xml(INVOICES_URL, USERNAME, PASSWORD)
-    df_slack_users = fetch_slack_users(SLACK_TOKEN)
+    print("🚀 Starting financial accounts job")
 
-    if df_user.empty or df_invoice.empty or df_slack_users.empty:
-        print("❌ One or more source dataframes are empty.")
-        return
-
-    df_invoice_fin = df_invoice[
-        (df_invoice["FINACCOUNT_CODE"] == "4045")
-        & (df_invoice["INVOICE_NUMBER"].str.contains("PF", case=False, na=False))
-    ].copy()
-
-    df_slack = df_slack_users[
-        (~df_slack_users["is_bot"]) & (~df_slack_users["deleted"])
-    ].copy()
-    df_slack["email"] = df_slack["email"].astype(str).str.lower().str.strip()
-
-    df_user["email"] = df_user["DIVISION_OWNER_MAIL"].astype(str).str.lower().str.strip()
-    merged_user = pd.merge(df_user, df_slack, on="email", how="left", suffixes=("", "_owner"))
-
-    df_invoice_fin["email"] = df_invoice_fin["INVOICE_OWNER_MAIL"].astype(str).str.lower().str.strip()
-    merged_fin = pd.merge(df_invoice_fin, df_slack, on="email", how="left", suffixes=("", "_user"))
-    merged_fin["User"] = merged_fin["INVOICE_OWNER_MAIL"]
-
-    df_combined_fin = pd.merge(merged_fin, merged_user, on="User", how="left")
-    df_combined_fin = df_combined_fin.rename(
-        columns={
-            "user_id_x": "user_slack_id",
-            "user_id_y": "owner_slack_id",
-            "email_x": "user_email",
-            "email_y": "owner_email",
-        }
+    df_invoice = get_odata_dataframe_xml(
+        INVOICES_URL,
+        USERNAME,
+        PASSWORD,
     )
 
-    date_col = "CREATED_DT_y" if "CREATED_DT_y" in df_combined_fin.columns else "CREATED_DT"
-    df_combined_fin[date_col] = pd.to_datetime(df_combined_fin[date_col], errors="coerce")
-    cutoff = pd.Timestamp.today() - pd.Timedelta(days=120)
-    filtered_fin = df_combined_fin[df_combined_fin[date_col] >= cutoff].copy()
+    if df_invoice.empty:
+        print("❌ Invoice data is empty. Stopping job.")
+        print("✅ Financial accounts job finished")
+        print("📬 No Slack messages were sent.")
+        return
 
-    print(f"✅ Financial accounts rows to notify: {len(filtered_fin)}")
-    notify_users_about_invoices(filtered_fin, slack_token=SLACK_TOKEN, preview=TEST_MODE)
+    df_financial_accounts = prepare_financial_account_invoices(df_invoice)
+
+    if df_financial_accounts.empty:
+        print("ℹ️ No 4045 financial account invoice rows found in the last 120 days.")
+        print("✅ Financial accounts job finished")
+        print("📬 No Slack messages were sent.")
+        return
+
+    df_slack_users = fetch_slack_users(SLACK_TOKEN)
+
+    if df_slack_users.empty:
+        print("❌ Slack users data is empty. Stopping job.")
+        print("✅ Financial accounts job finished")
+        print("📬 No Slack messages were sent.")
+        return
+
+    df_notifications = attach_slack_ids(
+        df_financial_accounts,
+        df_slack_users,
+    )
+
+    if df_notifications.empty:
+        print("ℹ️ No financial account invoices matched to Slack users.")
+        print("✅ Financial accounts job finished")
+        print("📬 No Slack messages were sent.")
+        return
+
+    sent_recipients = notify_users_about_invoices(
+        df_notifications,
+        slack_token=SLACK_TOKEN,
+        test_mode=TEST_MODE,
+    )
+
+    print("✅ Financial accounts job finished")
+    print_sent_recipients(sent_recipients)
 
 
 if __name__ == "__main__":
-    print("🚀 Starting financial accounts job")
     main()
-    print("✅ Financial accounts job finished")
