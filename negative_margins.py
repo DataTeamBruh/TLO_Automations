@@ -21,10 +21,15 @@ SLACK_TOKEN = os.getenv("slack_token")
 REQUIRED_MARGIN_COLUMNS = [
     "NAME",
     "OWNER_MAIL",
+    "OWNER_NAME",
+    "FOLDER_NAME",
     "CUBE_PROJECT_MARGIN",
     "STATE",
     "CREATED_DT",
 ]
+
+EXCLUDED_OWNERS = "Morgane|Darren Dr|Rabbi"
+EXCLUDED_FOLDERS = "Internal|General"
 
 
 def get_odata_dataframe_xml(url, username, password):
@@ -145,7 +150,11 @@ def fetch_slack_users(slack_token):
 def prepare_negative_margin_projects(df_margin):
     """
     Filter margin data to only open negative margin projects from the last 120 days.
-    Excludes projects with 'Flume' in the project name.
+
+    Excludes:
+    - Projects with 'Flume' in the project name
+    - Projects in Internal or General folders
+    - Projects owned by Morgane, Darren Dr, or Rabbi
     """
     if df_margin.empty:
         return pd.DataFrame()
@@ -167,6 +176,8 @@ def prepare_negative_margin_projects(df_margin):
 
     df["STATE"] = df["STATE"].astype(str).str.strip()
     df["NAME"] = df["NAME"].astype(str).str.strip()
+    df["OWNER_NAME"] = df["OWNER_NAME"].fillna("").astype(str).str.strip()
+    df["FOLDER_NAME"] = df["FOLDER_NAME"].fillna("").astype(str).str.strip()
 
     df["CREATED_DT"] = pd.to_datetime(
         df["CREATED_DT"],
@@ -179,6 +190,8 @@ def prepare_negative_margin_projects(df_margin):
         (df["CUBE_PROJECT_MARGIN"] < 0)
         & (df["STATE"].eq("Open"))
         & (~df["NAME"].str.contains("Flume", case=False, na=False))
+        & (~df["FOLDER_NAME"].str.contains(EXCLUDED_FOLDERS, case=False, na=False))
+        & (~df["OWNER_NAME"].str.contains(EXCLUDED_OWNERS, case=False, na=False))
         & (df["CREATED_DT"].notna())
         & (df["CREATED_DT"] >= cutoff)
     ].copy()
@@ -191,7 +204,15 @@ def prepare_negative_margin_projects(df_margin):
     )
 
     df = df[
-        ["user_email", "NAME", "CUBE_PROJECT_MARGIN", "STATE", "CREATED_DT"]
+        [
+            "user_email",
+            "NAME",
+            "OWNER_NAME",
+            "FOLDER_NAME",
+            "CUBE_PROJECT_MARGIN",
+            "STATE",
+            "CREATED_DT",
+        ]
     ].copy()
 
     print(f"✅ Negative margin projects after filtering: {len(df)}")
@@ -220,6 +241,8 @@ def attach_slack_ids(df_negative_margins, df_slack_users):
             "user_email",
             "user_slack_id",
             "NAME",
+            "OWNER_NAME",
+            "FOLDER_NAME",
             "CUBE_PROJECT_MARGIN",
             "CREATED_DT",
         ]
@@ -386,7 +409,7 @@ def main():
     df_negative_margins = prepare_negative_margin_projects(df_margin)
 
     if df_negative_margins.empty:
-        print("ℹ️ No negative margin projects found in the last 120 days.")
+        print("ℹ️ No negative margin projects found after filtering.")
         print("✅ Negative margins job finished")
         print("📬 No Slack messages were sent.")
         return
