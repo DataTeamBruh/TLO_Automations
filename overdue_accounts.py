@@ -91,11 +91,11 @@ def get_odata_dataframe_xml(url, username, password):
 
         df = pd.DataFrame(rows)
 
-        print(f"Parsed {len(df)} invoice records into DataFrame")
+        print(f"Parsed {len(df)} invoice records into DataFrame", flush=True)
         return df
 
     except Exception as e:
-        print(f"Error parsing XML invoice data: {e}")
+        print(f"Error parsing XML invoice data: {e}", flush=True)
         return pd.DataFrame()
 
 
@@ -138,7 +138,7 @@ def fetch_slack_users(slack_token):
         df = pd.DataFrame(users)
 
         if df.empty:
-            print("Slack users DataFrame is empty")
+            print("Slack users DataFrame is empty", flush=True)
             return df
 
         df = df[
@@ -150,11 +150,11 @@ def fetch_slack_users(slack_token):
 
         df["email"] = df["email"].astype(str).str.lower().str.strip()
 
-        print(f"Pulled {len(df)} active Slack users")
+        print(f"Pulled {len(df)} active Slack users", flush=True)
         return df
 
     except Exception as e:
-        print(f"Error fetching Slack users: {e}")
+        print(f"Error fetching Slack users: {e}", flush=True)
         return pd.DataFrame()
 
 
@@ -170,7 +170,7 @@ def prepare_overdue_invoices(df_invoice):
     ]
 
     if missing_columns:
-        print(f"Missing invoice columns: {missing_columns}")
+        print(f"Missing invoice columns: {missing_columns}", flush=True)
         return pd.DataFrame()
 
     df = df_invoice[REQUIRED_INVOICE_COLUMNS].copy()
@@ -204,7 +204,7 @@ def prepare_overdue_invoices(df_invoice):
         ["user_email", "INVOICE_NUMBER", "NAME", "INVOICE_INVOICE_DT"]
     ].copy()
 
-    print(f"Overdue invoices after filtering: {len(df)}")
+    print(f"Overdue invoices after filtering: {len(df)}", flush=True)
     return df
 
 
@@ -238,7 +238,10 @@ def attach_slack_ids(df_overdue, df_slack_users):
     missing_slack = df["user_slack_id"].isna().sum()
 
     if missing_slack:
-        print(f"{missing_slack} overdue invoice rows have no matching Slack user")
+        print(
+            f"{missing_slack} overdue invoice rows have no matching Slack user",
+            flush=True,
+        )
 
     df = df.dropna(subset=["user_slack_id"]).copy()
 
@@ -248,7 +251,10 @@ def attach_slack_ids(df_overdue, df_slack_users):
         subset=["user_slack_id", "user_email", "INVOICE_NUMBER", "NAME"]
     )
 
-    print(f"Overdue invoice rows ready for Slack notification: {len(df)}")
+    print(
+        f"Overdue invoice rows ready for Slack notification: {len(df)}",
+        flush=True,
+    )
     return df
 
 
@@ -291,12 +297,16 @@ def notify_users_overdue(df_notifications, slack_token, test_mode=True):
     Returns a list of recipients who were messaged,
     or who would be messaged in test mode.
     """
-    print("TEST MODE:", "ON - no Slack messages will be sent" if test_mode else "OFF")
+    print(
+        "TEST MODE:",
+        "ON - no Slack messages will be sent" if test_mode else "OFF",
+        flush=True,
+    )
 
     sent_recipients = []
 
     if df_notifications.empty:
-        print("No overdue invoices to notify")
+        print("No overdue invoices to notify", flush=True)
         return sent_recipients
 
     client = WebClient(token=slack_token)
@@ -311,7 +321,7 @@ def notify_users_overdue(df_notifications, slack_token, test_mode=True):
         .reset_index()
     )
 
-    print(f"Users to notify: {len(grouped)}")
+    print(f"Users to notify: {len(grouped)}", flush=True)
 
     for _, row in grouped.iterrows():
         user_id = row["user_slack_id"]
@@ -349,11 +359,11 @@ def notify_users_overdue(df_notifications, slack_token, test_mode=True):
             f"Thanks so much for helping keep things on track 💙"
         )
 
-        print("\n" + "=" * 80)
-        print(f"Slack message preview for {user_email} ({user_id}):")
-        print("=" * 80)
-        print(message)
-        print("=" * 80 + "\n")
+        print("\n" + "=" * 80, flush=True)
+        print(f"Slack message preview for {user_email} ({user_id}):", flush=True)
+        print("=" * 80, flush=True)
+        print(message, flush=True)
+        print("=" * 80 + "\n", flush=True)
 
         recipient_record = {
             "user_email": user_email,
@@ -362,14 +372,14 @@ def notify_users_overdue(df_notifications, slack_token, test_mode=True):
         }
 
         if test_mode:
-            print(f"TEST -> Would DM {user_email} ({user_id})")
+            print(f"TEST -> Would DM {user_email} ({user_id})", flush=True)
             sent_recipients.append(recipient_record)
             continue
 
         try:
             channel_id = open_dm_channel(client, user_id)
             client.chat_postMessage(channel=channel_id, text=message)
-            print(f"Message sent to {user_email}")
+            print(f"Message sent to {user_email}", flush=True)
             sent_recipients.append(recipient_record)
 
         except SlackApiError as e:
@@ -379,11 +389,12 @@ def notify_users_overdue(df_notifications, slack_token, test_mode=True):
 
             print(
                 f"Error sending to {user_email}: {error}"
-                + (f" - needed: {needed}" if needed else "")
+                + (f" - needed: {needed}" if needed else ""),
+                flush=True,
             )
 
         except Exception as e:
-            print(f"Unexpected error sending to {user_email}: {e}")
+            print(f"Unexpected error sending to {user_email}: {e}", flush=True)
 
     return sent_recipients
 
@@ -396,25 +407,27 @@ def print_sent_recipients(sent_recipients):
         print(
             "Messages sent to:"
             if not TEST_MODE
-            else "TEST MODE - messages would be sent to:"
+            else "TEST MODE - messages would be sent to:",
+            flush=True,
         )
 
         for recipient in sent_recipients:
             print(
                 f"- {recipient['user_email']} "
                 f"({recipient['user_slack_id']}) "
-                f"- {recipient['invoice_count']} invoice(s)"
+                f"- {recipient['invoice_count']} invoice(s)",
+                flush=True,
             )
     else:
-        print("No Slack messages were sent.")
+        print("No Slack messages were sent.", flush=True)
 
 
 def main():
     if not all([INVOICES_URL, USERNAME, PASSWORD, SLACK_TOKEN]):
-        print("Missing one or more required environment variables.")
+        print("Missing one or more required environment variables.", flush=True)
         return
 
-    print("Starting overdue accounts job")
+    print("Starting overdue accounts job", flush=True)
 
     df_invoice = get_odata_dataframe_xml(
         INVOICES_URL,
@@ -423,33 +436,33 @@ def main():
     )
 
     if df_invoice.empty:
-        print("Invoice data is empty. Stopping job.")
-        print("Overdue accounts job finished")
-        print("No Slack messages were sent.")
+        print("Invoice data is empty. Stopping job.", flush=True)
+        print("Overdue accounts job finished", flush=True)
+        print("No Slack messages were sent.", flush=True)
         return
 
     df_overdue = prepare_overdue_invoices(df_invoice)
 
     if df_overdue.empty:
-        print("No overdue invoices found in the last 120 days.")
-        print("Overdue accounts job finished")
-        print("No Slack messages were sent.")
+        print("No overdue invoices found in the last 120 days.", flush=True)
+        print("Overdue accounts job finished", flush=True)
+        print("No Slack messages were sent.", flush=True)
         return
 
     df_slack_users = fetch_slack_users(SLACK_TOKEN)
 
     if df_slack_users.empty:
-        print("Slack users data is empty. Stopping job.")
-        print("Overdue accounts job finished")
-        print("No Slack messages were sent.")
+        print("Slack users data is empty. Stopping job.", flush=True)
+        print("Overdue accounts job finished", flush=True)
+        print("No Slack messages were sent.", flush=True)
         return
 
     df_notifications = attach_slack_ids(df_overdue, df_slack_users)
 
     if df_notifications.empty:
-        print("No overdue invoices matched to Slack users.")
-        print("Overdue accounts job finished")
-        print("No Slack messages were sent.")
+        print("No overdue invoices matched to Slack users.", flush=True)
+        print("Overdue accounts job finished", flush=True)
+        print("No Slack messages were sent.", flush=True)
         return
 
     sent_recipients = notify_users_overdue(
@@ -458,7 +471,7 @@ def main():
         test_mode=TEST_MODE,
     )
 
-    print("Overdue accounts job finished")
+    print("Overdue accounts job finished", flush=True)
     print_sent_recipients(sent_recipients)
 
 
