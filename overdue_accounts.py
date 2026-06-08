@@ -8,7 +8,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 
-TEST_MODE = False # Set to True to prevent actual Slack messages during testing
+TEST_MODE = True # Set to True to prevent actual Slack messages during testing
 
 load_dotenv()
 
@@ -25,6 +25,22 @@ REQUIRED_INVOICE_COLUMNS = [
     "INVOICE_OWNER_MAIL",
     "INVOICE_INVOICE_DT",
 ]
+
+
+DEPARTMENT_NAMES = {
+    "Client Service",
+    "Design",
+    "Copywriting",
+    "Animation",
+    "SEO",
+    "Data",
+    "Social Media",
+    "UX/UI/CRO",
+    "Strategy",
+    "Content",
+    "Development",
+    "Traffic",
+}
 
 
 def get_odata_dataframe_xml(url, username, password):
@@ -126,10 +142,10 @@ def fetch_slack_users(slack_token):
             return df
 
         df = df[
-            (~df["is_bot"]) &
-            (~df["deleted"]) &
-            (df["email"].notna()) &
-            (df["email"] != "")
+            (~df["is_bot"])
+            & (~df["deleted"])
+            & (df["email"].notna())
+            & (df["email"] != "")
         ][["email", "user_id"]].copy()
 
         df["email"] = df["email"].astype(str).str.lower().str.strip()
@@ -170,8 +186,8 @@ def prepare_overdue_invoices(df_invoice):
     cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=120)
 
     df = df[
-        df["INVOICE_INVOICE_DT"].notna() &
-        (df["INVOICE_INVOICE_DT"] >= cutoff)
+        df["INVOICE_INVOICE_DT"].notna()
+        & (df["INVOICE_INVOICE_DT"] >= cutoff)
     ].copy()
 
     df["user_email"] = (
@@ -210,7 +226,13 @@ def attach_slack_ids(df_overdue, df_slack_users):
     df = df.rename(columns={"user_id": "user_slack_id"})
 
     df = df[
-        ["user_email", "user_slack_id", "INVOICE_NUMBER", "NAME", "INVOICE_INVOICE_DT"]
+        [
+            "user_email",
+            "user_slack_id",
+            "INVOICE_NUMBER",
+            "NAME",
+            "INVOICE_INVOICE_DT",
+        ]
     ].copy()
 
     missing_slack = df["user_slack_id"].isna().sum()
@@ -230,6 +252,33 @@ def attach_slack_ids(df_overdue, df_slack_users):
     return df
 
 
+def get_invoice_display_name(names):
+    """
+    Pick the best display name for a consolidated invoice.
+
+    Some invoice rows are department line items such as Data, Development,
+    Traffic, etc. We want the main client/project name where possible.
+    """
+    cleaned_names = [
+        str(name).strip()
+        for name in names
+        if pd.notna(name) and str(name).strip()
+    ]
+
+    non_department_names = [
+        name for name in cleaned_names
+        if name not in DEPARTMENT_NAMES
+    ]
+
+    if non_department_names:
+        return non_department_names[0]
+
+    if cleaned_names:
+        return cleaned_names[0]
+
+    return "No invoice details found"
+
+
 def open_dm_channel(client, user_id):
     response = client.conversations_open(users=[user_id])
     return response["channel"]["id"]
@@ -238,6 +287,7 @@ def open_dm_channel(client, user_id):
 def notify_users_overdue(df_notifications, slack_token, test_mode=True):
     """
     Group invoices by Slack user and send one DM per user.
+    Each invoice appears once, even if it has multiple department/line-item rows.
     Returns a list of recipients who were messaged,
     or who would be messaged in test mode.
     """
@@ -269,17 +319,25 @@ def notify_users_overdue(df_notifications, slack_token, test_mode=True):
         invoices = row["invoice_numbers"]
         entities = row["entity_names"]
 
-        seen = set()
-        lines = []
+        invoice_map = {}
 
         for invoice_number, entity_name in zip(invoices, entities):
-            key = (invoice_number, entity_name)
+            invoice_number = str(invoice_number).strip()
+            entity_name = str(entity_name).strip()
 
-            if key in seen:
+            if not invoice_number:
                 continue
 
-            seen.add(key)
-            lines.append(f"• *{invoice_number}* — {entity_name}")
+            if invoice_number not in invoice_map:
+                invoice_map[invoice_number] = []
+
+            invoice_map[invoice_number].append(entity_name)
+
+        lines = []
+
+        for invoice_number, names in invoice_map.items():
+            display_name = get_invoice_display_name(names)
+            lines.append(f"• *{invoice_number}* — {display_name}")
 
         invoice_block = "\n".join(lines) if lines else "• No invoice details found"
 
