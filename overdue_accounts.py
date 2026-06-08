@@ -8,7 +8,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 
-TEST_MODE = True  # Set to False when you are ready to send actual Slack messages
+TEST_MODE = False  # Set to False when you are ready to send actual Slack messages
 
 load_dotenv()
 
