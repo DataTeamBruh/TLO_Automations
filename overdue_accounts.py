@@ -20,26 +20,36 @@ SLACK_TOKEN = os.getenv("slack_token")
 
 REQUIRED_INVOICE_COLUMNS = [
     "INVOICE_NUMBER",
+    "NAME",
     "INVOICE_STATE",
     "INVOICE_OWNER_MAIL",
     "INVOICE_INVOICE_DT",
 ]
 
 
-INVOICE_TITLE_CANDIDATES = [
-    "INVOICE_NAME",
-    "INVOICE_TITLE",
-    "TITLE",
-    "SUBJECT",
-    "DOCUMENT_NAME",
-    "HEADER",
-    "INVOICE_HEADER",
-    "DESCRIPTION",
-    "INVOICE_DESCRIPTION",
-    "PROJECT_NAME",
-    "JOB_NAME",
-    "NAME",
-]
+DEPARTMENT_NAMES = {
+    "Client Service",
+    "Design",
+    "Copywriting",
+    "Copy",
+    "Animation",
+    "SEO",
+    "Data",
+    "Social Media",
+    "UX/UI/CRO",
+    "Strategy",
+    "Content",
+    "Development",
+    "Dev",
+    "Traffic",
+    "Creative",
+    "Social",
+    "Account Management",
+    "Project Management",
+    "Dashboard Consulting",
+    "Meetings & Admin",
+    "Media Management",
+}
 
 
 def clean_value(value):
@@ -54,23 +64,14 @@ def clean_value(value):
     return value
 
 
-def get_first_existing_column(df, candidates):
-    """
-    Return the first candidate column that exists in the DataFrame.
-    """
-    for col in candidates:
-        if col in df.columns:
-            return col
-
-    return None
-
-
 def clean_invoice_title(value):
     """
-    Turns:
+    Clean the invoice title/project name.
+
+    Example:
     TAX INVOICE TFS | PPC 2025/2026 | February - March 2026
 
-    into:
+    becomes:
     TFS | PPC 2025/2026 | February - March 2026
     """
     value = clean_value(value)
@@ -84,11 +85,33 @@ def clean_invoice_title(value):
     return value
 
 
+def remove_department_suffix(invoice_title):
+    """
+    Remove department/service suffixes from invoice titles.
+
+    Example:
+    Absa | Insurance Company iDirect | April 2026 | Design
+
+    becomes:
+    Absa | Insurance Company iDirect | April 2026
+    """
+    invoice_title = clean_value(invoice_title)
+
+    if not invoice_title:
+        return ""
+
+    parts = [part.strip() for part in invoice_title.split("|")]
+
+    if len(parts) > 1 and parts[-1] in DEPARTMENT_NAMES:
+        parts = parts[:-1]
+
+    return " | ".join(parts)
+
+
 def get_odata_dataframe_xml(url, username, password):
     """
     Fetch invoice data from an XML OData endpoint and convert it into a DataFrame.
-
-    This pulls all columns so we can detect the invoice title/header field.
+    Keeps only the invoice columns needed for this job.
     """
     try:
         headers = {"Accept": "application/atom+xml"}
@@ -124,7 +147,9 @@ def get_odata_dataframe_xml(url, username, password):
 
             for prop in properties:
                 column_name = prop.tag.split("}")[-1]
-                row[column_name] = prop.text
+
+                if column_name in REQUIRED_INVOICE_COLUMNS:
+                    row[column_name] = prop.text
 
             if row:
                 rows.append(row)
@@ -132,9 +157,6 @@ def get_odata_dataframe_xml(url, username, password):
         df = pd.DataFrame(rows)
 
         print(f"Parsed {len(df)} invoice records into DataFrame", flush=True)
-        print("Available invoice columns:", flush=True)
-        print(sorted(df.columns.tolist()), flush=True)
-
         return df
 
     except Exception as e:
@@ -203,13 +225,13 @@ def fetch_slack_users(slack_token):
 
 def prepare_overdue_invoices(df_invoice):
     """
-    Filter invoice data to only overdue invoices from the last 120 days.
+    Filter overdue invoices from the last 120 days.
 
-    Output is one row per actual invoice:
-    invoice_number | invoice_title
+    Uses:
+    - INVOICE_NUMBER as the invoice number
+    - NAME as the invoice/project title
 
-    Example:
-    FC-2886 | TFS | PPC 2025/2026 | February - March 2026
+    Cleans department suffixes so multiple department rows consolidate into one invoice.
     """
     if df_invoice.empty:
         return pd.DataFrame()
@@ -223,22 +245,7 @@ def prepare_overdue_invoices(df_invoice):
         print(f"Missing invoice columns: {missing_columns}", flush=True)
         return pd.DataFrame()
 
-    invoice_title_col = get_first_existing_column(
-        df_invoice,
-        INVOICE_TITLE_CANDIDATES,
-    )
-
-    print(f"Detected invoice title column: {invoice_title_col}", flush=True)
-
-    if not invoice_title_col:
-        print(
-            "Could not find the invoice title/header column. "
-            "Check the printed Available invoice columns and add the correct "
-            "column name to INVOICE_TITLE_CANDIDATES.",
-            flush=True,
-        )
-
-    df = df_invoice.copy()
+    df = df_invoice[REQUIRED_INVOICE_COLUMNS].copy()
 
     df["INVOICE_STATE"] = df["INVOICE_STATE"].astype(str).str.strip()
     df = df[df["INVOICE_STATE"].eq("Overdue")].copy()
@@ -264,12 +271,14 @@ def prepare_overdue_invoices(df_invoice):
 
     df["invoice_number"] = df["INVOICE_NUMBER"].astype(str).str.strip()
 
-    if invoice_title_col:
-        df["invoice_title"] = df[invoice_title_col].apply(clean_invoice_title)
-    else:
-        df["invoice_title"] = ""
+    df["invoice_title"] = (
+        df["NAME"]
+        .apply(clean_invoice_title)
+        .apply(remove_department_suffix)
+    )
 
     df = df[df["invoice_number"] != ""].copy()
+    df = df[df["invoice_title"] != ""].copy()
 
     df = df[
         [
@@ -280,22 +289,27 @@ def prepare_overdue_invoices(df_invoice):
         ]
     ].copy()
 
-    # One row per actual invoice.
+    # One row per invoice number + cleaned invoice title + owner.
+    # This is what consolidates department rows.
     df = (
         df.sort_values("INVOICE_INVOICE_DT")
         .drop_duplicates(
             subset=[
                 "user_email",
                 "invoice_number",
+                "invoice_title",
             ],
             keep="first",
         )
         .copy()
     )
 
-    print(f"Overdue invoices after invoice-level filtering: {len(df)}", flush=True)
+    print(
+        f"Overdue invoices after consolidated invoice-level filtering: {len(df)}",
+        flush=True,
+    )
 
-    print("Preview of overdue invoice records:", flush=True)
+    print("Preview of consolidated overdue invoice records:", flush=True)
     print(
         df[
             [
@@ -354,6 +368,7 @@ def attach_slack_ids(df_overdue, df_slack_users):
             "user_slack_id",
             "user_email",
             "invoice_number",
+            "invoice_title",
         ]
     )
 
@@ -419,10 +434,12 @@ def notify_users_overdue(df_notifications, slack_token, test_mode=True):
             if not invoice_number:
                 continue
 
-            if invoice_number in seen:
+            key = (invoice_number, invoice_title)
+
+            if key in seen:
                 continue
 
-            seen.add(invoice_number)
+            seen.add(key)
 
             if invoice_title:
                 lines.append(f"• *{invoice_number}* | {invoice_title}")
