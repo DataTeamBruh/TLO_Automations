@@ -49,6 +49,29 @@ DEPARTMENT_NAMES = {
     "Dashboard Consulting",
     "Meetings & Admin",
     "Media Management",
+    "Digital Paid Media",
+    "Google",
+    "Display",
+    "Paid Media Lead",
+    "Snr Media Strategist",
+    "Project Manager",
+    "Project Lead",
+    "Content Strategist",
+    "Designer",
+    "Copywriter",
+    "Copywriter Review",
+    "CCO Overview",
+    "Additional Design Services",
+    "Social Media Lead",
+    "Social Media Manager",
+    "Strategist",
+    "Flite Account Manager",
+    "Mid SEO Specialist",
+    "SEO Intern",
+    "Social Campaign Manager Reviews",
+    "Social Campaign Manager",
+    "Google Campaign Manager",
+    "Lead Campaign Manager",
 }
 
 
@@ -106,6 +129,38 @@ def remove_department_suffix(invoice_title):
         parts = parts[:-1]
 
     return " | ".join(parts)
+
+
+def choose_best_invoice_title(titles):
+    """
+    Pick the best cleaned title for one invoice number.
+
+    After removing department suffixes, there can still be multiple candidate titles.
+    Prefer the longest useful title because it usually has the full client/project/month.
+    """
+    cleaned_titles = []
+
+    for title in titles:
+        title = clean_value(title)
+
+        if not title:
+            continue
+
+        cleaned_titles.append(title)
+
+    unique_titles = list(dict.fromkeys(cleaned_titles))
+
+    if not unique_titles:
+        return ""
+
+    # Prefer titles with separators because they usually look like:
+    # Client | Project | Month
+    separator_titles = [title for title in unique_titles if "|" in title]
+
+    if separator_titles:
+        return max(separator_titles, key=len)
+
+    return max(unique_titles, key=len)
 
 
 def get_odata_dataframe_xml(url, username, password):
@@ -231,7 +286,7 @@ def prepare_overdue_invoices(df_invoice):
     - INVOICE_NUMBER as the invoice number
     - NAME as the invoice/project title
 
-    Cleans department suffixes so multiple department rows consolidate into one invoice.
+    Consolidates to one row per invoice number per owner.
     """
     if df_invoice.empty:
         return pd.DataFrame()
@@ -289,23 +344,23 @@ def prepare_overdue_invoices(df_invoice):
         ]
     ].copy()
 
-    # One row per invoice number + cleaned invoice title + owner.
-    # This is what consolidates department rows.
+    # IMPORTANT:
+    # Consolidate to ONE row per invoice number per owner.
+    # This stops FC-3238, FM-1076, etc. from printing once per role/department.
     df = (
-        df.sort_values("INVOICE_INVOICE_DT")
-        .drop_duplicates(
-            subset=[
-                "user_email",
-                "invoice_number",
-                "invoice_title",
-            ],
-            keep="first",
+        df.groupby(
+            ["user_email", "invoice_number"],
+            dropna=False,
         )
-        .copy()
+        .agg(
+            invoice_title=("invoice_title", choose_best_invoice_title),
+            INVOICE_INVOICE_DT=("INVOICE_INVOICE_DT", "min"),
+        )
+        .reset_index()
     )
 
     print(
-        f"Overdue invoices after consolidated invoice-level filtering: {len(df)}",
+        f"Overdue invoices after invoice-number consolidation: {len(df)}",
         flush=True,
     )
 
@@ -363,12 +418,12 @@ def attach_slack_ids(df_overdue, df_slack_users):
 
     df["user_slack_id"] = df["user_slack_id"].astype(str).str.strip()
 
+    # Dedupe by invoice number only.
     df = df.drop_duplicates(
         subset=[
             "user_slack_id",
             "user_email",
             "invoice_number",
-            "invoice_title",
         ]
     )
 
@@ -434,12 +489,11 @@ def notify_users_overdue(df_notifications, slack_token, test_mode=True):
             if not invoice_number:
                 continue
 
-            key = (invoice_number, invoice_title)
-
-            if key in seen:
+            # Dedupe by invoice number only.
+            if invoice_number in seen:
                 continue
 
-            seen.add(key)
+            seen.add(invoice_number)
 
             if invoice_title:
                 lines.append(f"• *{invoice_number}* | {invoice_title}")
