@@ -8,7 +8,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 
-TEST_MODE = False  # Set to False when you are ready to send actual Slack messages
+TEST_MODE = True  # Set to False when you are ready to send actual Slack messages
 
 load_dotenv()
 
@@ -161,6 +161,10 @@ def fetch_slack_users(slack_token):
 def prepare_overdue_invoices(df_invoice):
     """
     Filter invoice data to only overdue invoices from the last 120 days.
+
+    Output one row per invoice owner + invoice number + invoice name.
+    Department line-item rows are removed so Slack messages show:
+    Client/Invoice Number | Invoice Name
     """
     if df_invoice.empty:
         return pd.DataFrame()
@@ -197,12 +201,23 @@ def prepare_overdue_invoices(df_invoice):
         .str.strip()
     )
 
-    df["INVOICE_NUMBER"] = df["INVOICE_NUMBER"].astype(str).str.strip()
-    df["NAME"] = df["NAME"].astype(str).str.strip()
+    df["client"] = df["INVOICE_NUMBER"].astype(str).str.strip()
+    df["invoice_name"] = df["NAME"].astype(str).str.strip()
+
+    df = df[df["client"] != ""].copy()
+    df = df[df["invoice_name"] != ""].copy()
+
+    # Remove invoice line-item / department rows
+    df = df[~df["invoice_name"].isin(DEPARTMENT_NAMES)].copy()
 
     df = df[
-        ["user_email", "INVOICE_NUMBER", "NAME", "INVOICE_INVOICE_DT"]
+        ["user_email", "client", "invoice_name", "INVOICE_INVOICE_DT"]
     ].copy()
+
+    # One row per client + invoice name + owner
+    df = df.drop_duplicates(
+        subset=["user_email", "client", "invoice_name"]
+    )
 
     print(f"Overdue invoices after filtering: {len(df)}", flush=True)
     return df
@@ -229,8 +244,8 @@ def attach_slack_ids(df_overdue, df_slack_users):
         [
             "user_email",
             "user_slack_id",
-            "INVOICE_NUMBER",
-            "NAME",
+            "client",
+            "invoice_name",
             "INVOICE_INVOICE_DT",
         ]
     ].copy()
@@ -248,7 +263,7 @@ def attach_slack_ids(df_overdue, df_slack_users):
     df["user_slack_id"] = df["user_slack_id"].astype(str).str.strip()
 
     df = df.drop_duplicates(
-        subset=["user_slack_id", "user_email", "INVOICE_NUMBER", "NAME"]
+        subset=["user_slack_id", "user_email", "client", "invoice_name"]
     )
 
     print(
@@ -256,33 +271,6 @@ def attach_slack_ids(df_overdue, df_slack_users):
         flush=True,
     )
     return df
-
-
-def get_invoice_display_name(names):
-    """
-    Pick the best display name for a consolidated invoice.
-
-    Some invoice rows are department line items such as Data, Development,
-    Traffic, etc. We want the main client/project name where possible.
-    """
-    cleaned_names = [
-        str(name).strip()
-        for name in names
-        if pd.notna(name) and str(name).strip()
-    ]
-
-    non_department_names = [
-        name for name in cleaned_names
-        if name not in DEPARTMENT_NAMES
-    ]
-
-    if non_department_names:
-        return non_department_names[0]
-
-    if cleaned_names:
-        return cleaned_names[0]
-
-    return "No invoice details found"
 
 
 def open_dm_channel(client, user_id):
@@ -293,9 +281,9 @@ def open_dm_channel(client, user_id):
 def notify_users_overdue(df_notifications, slack_token, test_mode=True):
     """
     Group invoices by Slack user and send one DM per user.
-    Each invoice appears once, even if it has multiple department/line-item rows.
-    Returns a list of recipients who were messaged,
-    or who would be messaged in test mode.
+
+    Each invoice appears once as:
+    Client/Invoice Number | Invoice Name
     """
     print(
         "TEST MODE:",
@@ -315,8 +303,8 @@ def notify_users_overdue(df_notifications, slack_token, test_mode=True):
         df_notifications
         .groupby(["user_slack_id", "user_email"], dropna=False)
         .agg(
-            invoice_numbers=("INVOICE_NUMBER", list),
-            entity_names=("NAME", list),
+            clients=("client", list),
+            invoice_names=("invoice_name", list),
         )
         .reset_index()
     )
@@ -326,28 +314,30 @@ def notify_users_overdue(df_notifications, slack_token, test_mode=True):
     for _, row in grouped.iterrows():
         user_id = row["user_slack_id"]
         user_email = row["user_email"]
-        invoices = row["invoice_numbers"]
-        entities = row["entity_names"]
-
-        invoice_map = {}
-
-        for invoice_number, entity_name in zip(invoices, entities):
-            invoice_number = str(invoice_number).strip()
-            entity_name = str(entity_name).strip()
-
-            if not invoice_number:
-                continue
-
-            if invoice_number not in invoice_map:
-                invoice_map[invoice_number] = []
-
-            invoice_map[invoice_number].append(entity_name)
+        clients = row["clients"]
+        invoice_names = row["invoice_names"]
 
         lines = []
+        seen = set()
 
-        for invoice_number, names in invoice_map.items():
-            display_name = get_invoice_display_name(names)
-            lines.append(f"• *{invoice_number}* — {display_name}")
+        for client_name, invoice_name in zip(clients, invoice_names):
+            client_name = str(client_name).strip()
+            invoice_name = str(invoice_name).strip()
+
+            if not client_name:
+                continue
+
+            if not invoice_name:
+                invoice_name = "No invoice name found"
+
+            key = (client_name, invoice_name)
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            lines.append(f"• *{client_name}* | {invoice_name}")
 
         invoice_block = "\n".join(lines) if lines else "• No invoice details found"
 
