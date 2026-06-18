@@ -20,59 +20,62 @@ SLACK_TOKEN = os.getenv("slack_token")
 
 REQUIRED_INVOICE_COLUMNS = [
     "INVOICE_NUMBER",
+    "NAME",
     "INVOICE_STATE",
     "INVOICE_OWNER_MAIL",
     "INVOICE_INVOICE_DT",
 ]
 
 
-CLIENT_COLUMN_CANDIDATES = [
-    "CLIENT_NAME",
-    "CUSTOMER_NAME",
-    "CUSTOMER",
-    "DEBTOR_NAME",
-    "ACCOUNT_NAME",
-    "COMPANY_NAME",
-    "ORGANISATION_NAME",
-    "ORGANIZATION_NAME",
-]
-
-INVOICE_NAME_COLUMN_CANDIDATES = [
-    "INVOICE_NAME",
-    "INVOICE_TITLE",
-    "TITLE",
-    "SUBJECT",
-    "DOCUMENT_NAME",
-    "DESCRIPTION",
-    "INVOICE_DESCRIPTION",
-    "PROJECT_NAME",
-    "JOB_NAME",
-]
-
-
-LINE_ITEM_NAME_COLUMN_CANDIDATES = [
-    "NAME",
-    "LINE_NAME",
-    "LINE_ITEM_NAME",
-    "ITEM_NAME",
-    "ITEM_DESCRIPTION",
-]
+DEPARTMENT_NAMES = {
+    "Client Service",
+    "Design",
+    "Copywriting",
+    "Animation",
+    "SEO",
+    "Data",
+    "Social Media",
+    "UX/UI/CRO",
+    "Strategy",
+    "Content",
+    "Development",
+    "Traffic",
+    "Creative",
+    "Social",
+    "Account Management",
+    "Project Management",
+    "Dashboard Consulting",
+    "Meetings & Admin",
+    "Media Management",
+}
 
 
-def get_first_existing_column(df, candidates):
-    for col in candidates:
-        if col in df.columns:
-            return col
-    return None
+def clean_value(value):
+    value = str(value).strip()
+
+    if not value or value.lower() in {"nan", "none", "null"}:
+        return ""
+
+    return value
+
+
+def is_department_or_line_item(name):
+    """
+    Returns True when NAME looks like a department/service line item
+    rather than a project name.
+    """
+    name = clean_value(name)
+
+    if not name:
+        return True
+
+    return name in DEPARTMENT_NAMES
 
 
 def get_odata_dataframe_xml(url, username, password):
     """
     Fetch invoice data from an XML OData endpoint and convert it into a DataFrame.
-
-    Important:
-    This pulls all columns, not only NAME, because NAME appears to be line-item
-    description in your feed.
+    Keeps only the invoice columns needed for this job.
     """
     try:
         headers = {"Accept": "application/atom+xml"}
@@ -108,7 +111,9 @@ def get_odata_dataframe_xml(url, username, password):
 
             for prop in properties:
                 column_name = prop.tag.split("}")[-1]
-                row[column_name] = prop.text
+
+                if column_name in REQUIRED_INVOICE_COLUMNS:
+                    row[column_name] = prop.text
 
             if row:
                 rows.append(row)
@@ -116,9 +121,6 @@ def get_odata_dataframe_xml(url, username, password):
         df = pd.DataFrame(rows)
 
         print(f"Parsed {len(df)} invoice records into DataFrame", flush=True)
-        print("Available invoice columns:", flush=True)
-        print(sorted(df.columns.tolist()), flush=True)
-
         return df
 
     except Exception as e:
@@ -187,12 +189,13 @@ def fetch_slack_users(slack_token):
 
 def prepare_overdue_invoices(df_invoice):
     """
-    Filter invoice data to only overdue invoices from the last 120 days.
+    Filter overdue invoices from the last 120 days.
 
-    Output one row per invoice owner + invoice number.
+    Uses:
+    - INVOICE_NUMBER as the invoice number
+    - NAME as the project name
 
-    This avoids using NAME as the invoice title, because NAME appears to be
-    invoice line-item description.
+    Removes obvious department/service line-item rows.
     """
     if df_invoice.empty:
         return pd.DataFrame()
@@ -205,37 +208,7 @@ def prepare_overdue_invoices(df_invoice):
         print(f"Missing invoice columns: {missing_columns}", flush=True)
         return pd.DataFrame()
 
-    client_col = get_first_existing_column(df_invoice, CLIENT_COLUMN_CANDIDATES)
-    invoice_name_col = get_first_existing_column(
-        df_invoice,
-        INVOICE_NAME_COLUMN_CANDIDATES,
-    )
-
-    line_item_col = get_first_existing_column(
-        df_invoice,
-        LINE_ITEM_NAME_COLUMN_CANDIDATES,
-    )
-
-    print(f"Detected client column: {client_col}", flush=True)
-    print(f"Detected invoice name column: {invoice_name_col}", flush=True)
-    print(f"Detected line-item column: {line_item_col}", flush=True)
-
-    if not client_col:
-        print(
-            "Could not find a client column. Check the printed available columns "
-            "and add the correct one to CLIENT_COLUMN_CANDIDATES.",
-            flush=True,
-        )
-
-    if not invoice_name_col:
-        print(
-            "Could not find an invoice-name/title column. Check the printed "
-            "available columns and add the correct one to "
-            "INVOICE_NAME_COLUMN_CANDIDATES.",
-            flush=True,
-        )
-
-    df = df_invoice.copy()
+    df = df_invoice[REQUIRED_INVOICE_COLUMNS].copy()
 
     df["INVOICE_STATE"] = df["INVOICE_STATE"].astype(str).str.strip()
     df = df[df["INVOICE_STATE"].eq("Overdue")].copy()
@@ -260,55 +233,39 @@ def prepare_overdue_invoices(df_invoice):
     )
 
     df["invoice_number"] = df["INVOICE_NUMBER"].astype(str).str.strip()
-
-    if client_col:
-        df["client"] = df[client_col].astype(str).str.strip()
-    else:
-        df["client"] = "Unknown client"
-
-    if invoice_name_col:
-        df["invoice_name"] = df[invoice_name_col].astype(str).str.strip()
-    else:
-        df["invoice_name"] = "Unknown invoice name"
+    df["project_name"] = df["NAME"].astype(str).str.strip()
 
     df = df[df["invoice_number"] != ""].copy()
+    df = df[df["project_name"] != ""].copy()
+
+    # Remove rows where NAME is clearly a department/service line item.
+    df = df[~df["project_name"].apply(is_department_or_line_item)].copy()
 
     df = df[
         [
             "user_email",
             "invoice_number",
-            "client",
-            "invoice_name",
+            "project_name",
             "INVOICE_INVOICE_DT",
         ]
     ].copy()
 
-    # This is the important part:
-    # one row per actual invoice, not one row per line item.
-    df = (
-        df.sort_values("INVOICE_INVOICE_DT")
-        .drop_duplicates(
-            subset=[
-                "user_email",
-                "invoice_number",
-            ],
-            keep="first",
-        )
-        .copy()
+    # One row per invoice number + project name + owner.
+    df = df.drop_duplicates(
+        subset=["user_email", "invoice_number", "project_name"]
     )
 
-    print(f"Overdue invoices after invoice-level dedupe: {len(df)}", flush=True)
+    print(f"Overdue invoice/project rows after filtering: {len(df)}", flush=True)
 
-    print("Preview of invoice-level records:", flush=True)
+    print("Preview of overdue invoice records:", flush=True)
     print(
         df[
             [
                 "user_email",
                 "invoice_number",
-                "client",
-                "invoice_name",
+                "project_name",
             ]
-        ].head(20),
+        ].head(30),
         flush=True,
     )
 
@@ -337,8 +294,7 @@ def attach_slack_ids(df_overdue, df_slack_users):
             "user_email",
             "user_slack_id",
             "invoice_number",
-            "client",
-            "invoice_name",
+            "project_name",
             "INVOICE_INVOICE_DT",
         ]
     ].copy()
@@ -360,6 +316,7 @@ def attach_slack_ids(df_overdue, df_slack_users):
             "user_slack_id",
             "user_email",
             "invoice_number",
+            "project_name",
         ]
     )
 
@@ -378,10 +335,10 @@ def open_dm_channel(client, user_id):
 
 def notify_users_overdue(df_notifications, slack_token, test_mode=True):
     """
-    Group invoices by Slack user and send one DM per user.
+    Group overdue invoices by Slack user and send one DM per user.
 
-    Each invoice appears once as:
-    Client | Invoice Name
+    Each line shows:
+    Invoice Number — Project Name
     """
     print(
         "TEST MODE:",
@@ -402,8 +359,7 @@ def notify_users_overdue(df_notifications, slack_token, test_mode=True):
         .groupby(["user_slack_id", "user_email"], dropna=False)
         .agg(
             invoice_numbers=("invoice_number", list),
-            clients=("client", list),
-            invoice_names=("invoice_name", list),
+            project_names=("project_name", list),
         )
         .reset_index()
     )
@@ -415,40 +371,29 @@ def notify_users_overdue(df_notifications, slack_token, test_mode=True):
         user_email = row["user_email"]
 
         invoice_numbers = row["invoice_numbers"]
-        clients = row["clients"]
-        invoice_names = row["invoice_names"]
+        project_names = row["project_names"]
 
-        lines = []
         seen = set()
+        lines = []
 
-        for invoice_number, client_name, invoice_name in zip(
-            invoice_numbers,
-            clients,
-            invoice_names,
-        ):
-            invoice_number = str(invoice_number).strip()
-            client_name = str(client_name).strip()
-            invoice_name = str(invoice_name).strip()
+        for invoice_number, project_name in zip(invoice_numbers, project_names):
+            invoice_number = clean_value(invoice_number)
+            project_name = clean_value(project_name)
 
             if not invoice_number:
                 continue
 
-            if not client_name or client_name.lower() == "nan":
-                client_name = "Unknown client"
-
-            if not invoice_name or invoice_name.lower() == "nan":
-                invoice_name = "Unknown invoice name"
-
-            key = invoice_number
+            key = (invoice_number, project_name)
 
             if key in seen:
                 continue
 
             seen.add(key)
 
-            lines.append(
-                f"• *{invoice_number}* — {client_name} | {invoice_name}"
-            )
+            if project_name:
+                lines.append(f"• *{invoice_number}* — {project_name}")
+            else:
+                lines.append(f"• *{invoice_number}*")
 
         invoice_block = "\n".join(lines) if lines else "• No invoice details found"
 
@@ -460,12 +405,6 @@ def notify_users_overdue(df_notifications, slack_token, test_mode=True):
             f"Thanks so much for helping keep things on track 💙"
         )
 
-        print("\n" + "=" * 80, flush=True)
-        print(f"Slack message preview for {user_email} ({user_id}):", flush=True)
-        print("=" * 80, flush=True)
-        print(message, flush=True)
-        print("=" * 80 + "\n", flush=True)
-
         recipient_record = {
             "user_email": user_email,
             "user_slack_id": user_id,
@@ -473,7 +412,7 @@ def notify_users_overdue(df_notifications, slack_token, test_mode=True):
         }
 
         if test_mode:
-            print(f"TEST -> Would DM {user_email} ({user_id})", flush=True)
+            print(f"TEST -> Would DM {user_email} ({user_id}):\n{message}\n")
             sent_recipients.append(recipient_record)
             continue
 
@@ -577,5 +516,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
     main()
