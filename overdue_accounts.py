@@ -8,7 +8,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 
-TEST_MODE = True  # TEST MODE: True means Slack messages will NOT be sent
+TEST_MODE = False  # TEST MODE: True means Slack messages will NOT be sent
 
 load_dotenv()
 
