@@ -8,7 +8,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 
-TEST_MODE = False  # Set to True to prevent actual Slack messages during testing
+TEST_MODE = True  # Set to True to prevent actual Slack messages during testing
 
 load_dotenv()
 
